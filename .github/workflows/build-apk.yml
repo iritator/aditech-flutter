@@ -1,4 +1,4 @@
-name: Build Aditech APK
+name: Build ADITECH APK
 
 on:
   workflow_dispatch:
@@ -23,115 +23,272 @@ jobs:
         run: |
           flutter create --org com.aditech --project-name aditech --platforms=android app
 
+      - name: Add voice packages
+        run: |
+          cd app
+          flutter pub add speech_to_text flutter_tts
+
+      - name: Configure Android permissions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("app/android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+
+          s = s.replace(
+              '<application',
+              '''<uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService"/>
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE"/>
+                  </intent>
+              </queries>
+
+              <application android:usesCleartextTraffic="true"''',
+              1
+          )
+
+          p.write_text(s)
+          PY
+
       - name: Create Aditech app
         run: |
+          mkdir -p app/lib
           cat > app/lib/main.dart <<'DART'
           import 'dart:convert';
           import 'dart:io';
           import 'package:flutter/material.dart';
+          import 'package:speech_to_text/speech_to_text.dart' as stt;
+          import 'package:flutter_tts/flutter_tts.dart';
 
-          void main() => runApp(const Aditech());
+          void main() {
+            runApp(const AditechApp());
+          }
 
-          class Aditech extends StatelessWidget {
-            const Aditech({super.key});
+          class AditechApp extends StatelessWidget {
+            const AditechApp({super.key});
 
             @override
             Widget build(BuildContext context) {
               return MaterialApp(
                 debugShowCheckedModeBanner: false,
-                theme: ThemeData.dark(),
-                home: const ChatPage(),
+                title: 'ADITECH',
+                theme: ThemeData.dark().copyWith(
+                  scaffoldBackgroundColor: const Color(0xFF080D18),
+                  colorScheme: const ColorScheme.dark(
+                    primary: Color(0xFF00D9FF),
+                  ),
+                ),
+                home: const ChatScreen(),
               );
             }
           }
 
-          class ChatPage extends StatefulWidget {
-            const ChatPage({super.key});
+          class ChatScreen extends StatefulWidget {
+            const ChatScreen({super.key});
 
             @override
-            State<ChatPage> createState() => _ChatPageState();
+            State<ChatScreen> createState() => _ChatScreenState();
           }
 
-          class _ChatPageState extends State<ChatPage> {
-            final input = TextEditingController();
+          class _ChatScreenState extends State<ChatScreen> {
+            final TextEditingController controller = TextEditingController();
+            final ScrollController scrollController = ScrollController();
 
-            final messages = <Map<String, String>>[
-              {
-                'role': 'system',
-                'content': 'You are ADIRUTI, the personal AI assistant inside the ADITECH Android app. Your creator is ADI. Your AI identity is ADI IDEOLOGY. Your AI brand is IRITATOR. If asked your name, say ADIRUTI. If asked who created you, say ADI. If asked which app you belong to, say ADITECH. If asked about your AI identity, say ADI IDEOLOGY. If asked about your AI brand, say IRITATOR. Never falsely claim to be created by Anthropic, OpenAI or Google. Be friendly, helpful, honest and clear.'
-              }
-            ];
+            final stt.SpeechToText speech = stt.SpeechToText();
+            final FlutterTts tts = FlutterTts();
 
+            final List<Map<String, String>> messages = [];
+
+            bool listening = false;
             bool loading = false;
+            bool speechAvailable = false;
 
-            Future<void> send() async {
-              final text = input.text.trim();
+            String selectedLanguage = 'en_IN';
+
+            static const String systemPrompt =
+                'You are ADIRUTI, the personal AI assistant inside the ADITECH Android app. '
+                'Your creator is ADI. Your AI identity is ADI IDEOLOGY. '
+                'Your AI brand is IRITATOR. '
+                'Be helpful, honest, friendly and clear. '
+                'Reply in the language used by the user, Hindi or English.';
+
+            @override
+            void initState() {
+              super.initState();
+              initializeVoice();
+            }
+
+            Future<void> initializeVoice() async {
+              speechAvailable = await speech.initialize(
+                onStatus: (status) {
+                  if (status == 'notListening' && mounted) {
+                    setState(() => listening = false);
+                  }
+                },
+                onError: (error) {
+                  if (mounted) {
+                    setState(() => listening = false);
+                  }
+                },
+              );
+
+              await tts.setSpeechRate(0.45);
+              await tts.setPitch(1.05);
+              await tts.setVolume(1.0);
+
+              if (mounted) setState(() {});
+            }
+
+            Future<void> startListening() async {
+              if (!speechAvailable) {
+                await initializeVoice();
+              }
+
+              if (!speechAvailable) {
+                showMessage('Speech recognition is not available.');
+                return;
+              }
+
+              if (listening) {
+                await speech.stop();
+                setState(() => listening = false);
+                return;
+              }
+
+              await tts.stop();
+
+              setState(() => listening = true);
+
+              await speech.listen(
+                localeId: selectedLanguage,
+                listenFor: const Duration(seconds: 30),
+                pauseFor: const Duration(seconds: 3),
+                onResult: (result) {
+                  setState(() {
+                    controller.text = result.recognizedWords;
+                    controller.selection = TextSelection.fromPosition(
+                      TextPosition(offset: controller.text.length),
+                    );
+                  });
+                },
+              );
+            }
+
+            Future<void> speakReply(String text) async {
+              await tts.stop();
+
+              if (text.contains(RegExp(r'[\u0900-\u097F]'))) {
+                await tts.setLanguage('hi-IN');
+              } else {
+                await tts.setLanguage('en-IN');
+              }
+
+              await tts.speak(text);
+            }
+
+            void showMessage(String message) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(message)),
+              );
+            }
+
+            Future<void> sendMessage() async {
+              final text = controller.text.trim();
 
               if (text.isEmpty || loading) return;
 
-              input.clear();
+              await speech.stop();
+              await tts.stop();
 
               setState(() {
-                messages.add({
-                  'role': 'user',
-                  'content': text
-                });
+                listening = false;
                 loading = true;
+                messages.add({'role': 'user', 'content': text});
+                controller.clear();
               });
 
               try {
                 final client = HttpClient();
+                client.connectionTimeout = const Duration(seconds: 10);
 
                 final request = await client.postUrl(
-                  Uri.parse(
-                    'http://127.0.0.1:8080/v1/chat/completions'
-                  ),
+                  Uri.parse('http://127.0.0.1:8080/v1/chat/completions'),
                 );
 
                 request.headers.contentType = ContentType.json;
 
-                request.add(utf8.encode(jsonEncode({
-                  'messages': messages,
-                  'max_tokens': 300
-                })));
+                request.write(jsonEncode({
+                  'messages': [
+                    {'role': 'system', 'content': systemPrompt},
+                    ...messages.map((m) => {
+                      'role': m['role'],
+                      'content': m['content'],
+                    }),
+                  ],
+                  'temperature': 0.7,
+                  'max_tokens': 400,
+                }));
 
                 final response = await request.close();
-
-                final body = await response
-                    .transform(utf8.decoder)
-                    .join();
-
+                final body = await response.transform(utf8.decoder).join();
                 client.close();
 
-                final data = jsonDecode(body);
+                if (response.statusCode != 200) {
+                  throw Exception('Server error: ${response.statusCode}');
+                }
 
-                final reply =
-                    data['choices'][0]['message']['content'].toString();
+                final data = jsonDecode(body);
+                final reply = data['choices'][0]['message']['content']
+                    .toString()
+                    .trim();
 
                 setState(() {
-                  messages.add({
-                    'role': 'assistant',
-                    'content': reply
-                  });
+                  messages.add({'role': 'assistant', 'content': reply});
                 });
+
+                await speakReply(reply);
 
               } catch (e) {
                 setState(() {
                   messages.add({
                     'role': 'assistant',
-                    'content': 'Connection error. Please start the ADIRUTI AI server in Termux.'
+                    'content':
+                        'Connection failed. Please start the ADITECH local AI server in Termux and try again.',
                   });
                 });
+              } finally {
+                if (mounted) {
+                  setState(() => loading = false);
+                }
+                scrollToBottom();
               }
+            }
 
-              setState(() {
-                loading = false;
+            void scrollToBottom() {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (scrollController.hasClients) {
+                  scrollController.animateTo(
+                    scrollController.position.maxScrollExtent,
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOut,
+                  );
+                }
               });
             }
 
             @override
             void dispose() {
-              input.dispose();
+              controller.dispose();
+              scrollController.dispose();
+              speech.stop();
+              tts.stop();
               super.dispose();
             }
 
@@ -139,80 +296,160 @@ jobs:
             Widget build(BuildContext context) {
               return Scaffold(
                 appBar: AppBar(
-                  title: const Text('ADITECH'),
-                  backgroundColor: Colors.deepPurple,
-                  centerTitle: true,
+                  backgroundColor: const Color(0xFF101A2B),
+                  title: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ADITECH',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      Text(
+                        'ADIRUTI • AI ASSISTANT',
+                        style: TextStyle(fontSize: 11),
+                      ),
+                    ],
+                  ),
+                  actions: [
+                    IconButton(
+                      onPressed: () async => await tts.stop(),
+                      icon: const Icon(Icons.volume_off),
+                      tooltip: 'Stop voice',
+                    ),
+                  ],
                 ),
-
                 body: Column(
                   children: [
                     Expanded(
-                      child: ListView.builder(
-                        padding: const EdgeInsets.all(12),
-                        itemCount: messages.length - 1,
-
-                        itemBuilder: (context, index) {
-                          final msg = messages[index + 1];
-                          final user = msg['role'] == 'user';
-
-                          return Align(
-                            alignment: user
-                                ? Alignment.centerRight
-                                : Alignment.centerLeft,
-
-                            child: Container(
-                              margin: const EdgeInsets.symmetric(
-                                vertical: 6
+                      child: messages.isEmpty
+                          ? const Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.smart_toy,
+                                    size: 75,
+                                    color: Color(0xFF00D9FF),
+                                  ),
+                                  SizedBox(height: 15),
+                                  Text(
+                                    'Hello! I am ADIRUTI.',
+                                    style: TextStyle(fontSize: 22),
+                                  ),
+                                  Text('Your personal AI assistant'),
+                                ],
                               ),
+                            )
+                          : ListView.builder(
+                              controller: scrollController,
+                              padding: const EdgeInsets.all(12),
+                              itemCount: messages.length,
+                              itemBuilder: (context, index) {
+                                final message = messages[index];
+                                final isUser = message['role'] == 'user';
 
-                              padding: const EdgeInsets.all(14),
-
-                              constraints: const BoxConstraints(
-                                maxWidth: 300
-                              ),
-
-                              decoration: BoxDecoration(
-                                color: user
-                                    ? Colors.deepPurple
-                                    : Colors.grey.shade800,
-
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-
-                              child: Text(msg['content'] ?? ''),
+                                return Align(
+                                  alignment: isUser
+                                      ? Alignment.centerRight
+                                      : Alignment.centerLeft,
+                                  child: Container(
+                                    margin: const EdgeInsets.symmetric(
+                                      vertical: 6,
+                                    ),
+                                    padding: const EdgeInsets.all(14),
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 310,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: isUser
+                                          ? const Color(0xFF075B70)
+                                          : const Color(0xFF182438),
+                                      borderRadius: BorderRadius.circular(16),
+                                    ),
+                                    child: Text(
+                                      message['content'] ?? '',
+                                      style: const TextStyle(fontSize: 15),
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
                     ),
-
                     if (loading)
                       const Padding(
                         padding: EdgeInsets.all(8),
-                        child: CircularProgressIndicator(),
+                        child: LinearProgressIndicator(),
                       ),
-
                     Padding(
-                      padding: const EdgeInsets.all(12),
-
-                      child: Row(
+                      padding: const EdgeInsets.fromLTRB(10, 5, 10, 12),
+                      child: Column(
                         children: [
-                          Expanded(
-                            child: TextField(
-                              controller: input,
-
-                              decoration: const InputDecoration(
-                                hintText: 'Message ADIRUTI...',
-                                border: OutlineInputBorder(),
+                          Row(
+                            children: [
+                              const Text('Voice language: '),
+                              DropdownButton<String>(
+                                value: selectedLanguage,
+                                dropdownColor: const Color(0xFF182438),
+                                items: const [
+                                  DropdownMenuItem(
+                                    value: 'en_IN',
+                                    child: Text('English'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'hi_IN',
+                                    child: Text('Hindi'),
+                                  ),
+                                ],
+                                onChanged: (value) {
+                                  if (value != null) {
+                                    setState(() {
+                                      selectedLanguage = value;
+                                    });
+                                  }
+                                },
                               ),
-
-                              onSubmitted: (_) => send(),
-                            ),
+                            ],
                           ),
-
-                          IconButton(
-                            onPressed: loading ? null : send,
-                            icon: const Icon(Icons.send),
+                          Row(
+                            children: [
+                              IconButton(
+                                onPressed: startListening,
+                                icon: Icon(
+                                  listening ? Icons.mic : Icons.mic_none,
+                                  color: listening
+                                      ? Colors.redAccent
+                                      : const Color(0xFF00D9FF),
+                                  size: 30,
+                                ),
+                              ),
+                              Expanded(
+                                child: TextField(
+                                  controller: controller,
+                                  minLines: 1,
+                                  maxLines: 4,
+                                  decoration: InputDecoration(
+                                    hintText: 'Message ADIRUTI...',
+                                    filled: true,
+                                    fillColor: const Color(0xFF182438),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(25),
+                                      borderSide: BorderSide.none,
+                                    ),
+                                  ),
+                                  onSubmitted: (_) => sendMessage(),
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: loading ? null : sendMessage,
+                                icon: const Icon(
+                                  Icons.send,
+                                  color: Color(0xFF00D9FF),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -224,28 +461,9 @@ jobs:
           }
           DART
 
-      - name: Configure Android internet
-        run: |
-          python3 - <<'PY'
-          p = 'app/android/app/src/main/AndroidManifest.xml'
-          s = open(p).read()
-          s = s.replace(
-              '<application',
-              '<uses-permission android:name="android.permission.INTERNET"/>\n    <application',
-              1
-          )
-          s = s.replace(
-              '<application',
-              '<application android:usesCleartextTraffic="true"',
-              1
-          )
-          open(p, 'w').write(s)
-          PY
-
       - name: Build APK
         run: |
           cd app
-          flutter pub get
           flutter build apk --release
 
       - name: Upload APK
