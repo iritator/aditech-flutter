@@ -54,128 +54,164 @@ jobs:
 
           class _ChatPageState extends State<ChatPage> {
             final input = TextEditingController();
+
             final messages = <Map<String, String>>[
               {
                 'role': 'system',
-                'content': '''
-        Your name is ADIRUTI.
-        You are the personal AI assistant inside the Aditech Android app.
-        Your creator is Adi.
-        Your AI engine brand is IRITATOR.
-
-        If asked your name, say ADIRUTI.
-        If asked who created you, say you were created by Adi.
-        If asked which app you belong to, say Aditech.
-        If asked about your AI engine, say IRITATOR.
-        If asked about your underlying model, honestly explain that it is based on ADI IDEOLOGY.
-
-        Never claim to be created by Anthropic, OpenAI or Google.
-        Be friendly, helpful, honest and clear.
-'''
+                'content': 'You are ADIRUTI, the personal AI assistant inside the ADITECH Android app. Your creator is ADI. Your AI identity is ADI IDEOLOGY. Your AI brand is IRITATOR. If asked your name, say ADIRUTI. If asked who created you, say ADI. If asked which app you belong to, say ADITECH. If asked about your AI identity, say ADI IDEOLOGY. If asked about your AI brand, say IRITATOR. Never falsely claim to be created by Anthropic, OpenAI or Google. Be friendly, helpful, honest and clear.'
               }
             ];
+
             bool loading = false;
 
             Future<void> send() async {
               final text = input.text.trim();
+
               if (text.isEmpty || loading) return;
 
               input.clear();
+
               setState(() {
-                messages.add({'role': 'user', 'content': text});
+                messages.add({
+                  'role': 'user',
+                  'content': text
+                });
                 loading = true;
               });
 
               try {
                 final client = HttpClient();
+
                 final request = await client.postUrl(
-                  Uri.parse('http://127.0.0.1:8080/v1/chat/completions'),
+                  Uri.parse(
+                    'http://127.0.0.1:8080/v1/chat/completions'
+                  ),
                 );
+
                 request.headers.contentType = ContentType.json;
+
                 request.add(utf8.encode(jsonEncode({
                   'messages': messages,
                   'max_tokens': 300
                 })));
 
                 final response = await request.close();
-                final body = await response.transform(utf8.decoder).join();
+
+                final body = await response
+                    .transform(utf8.decoder)
+                    .join();
+
                 client.close();
 
                 final data = jsonDecode(body);
-                final reply = data['choices'][0]['message']['content'];
+
+                final reply =
+                    data['choices'][0]['message']['content'].toString();
 
                 setState(() {
-                  messages.add({'role': 'assistant', 'content': reply});
+                  messages.add({
+                    'role': 'assistant',
+                    'content': reply
+                  });
                 });
+
               } catch (e) {
                 setState(() {
                   messages.add({
                     'role': 'assistant',
-                    'content': 'Connection error. Please start the Aditech AI server in Termux.'
+                    'content': 'Connection error. Please start the ADIRUTI AI server in Termux.'
                   });
                 });
               }
 
-              setState(() => loading = false);
+              setState(() {
+                loading = false;
+              });
+            }
+
+            @override
+            void dispose() {
+              input.dispose();
+              super.dispose();
             }
 
             @override
             Widget build(BuildContext context) {
               return Scaffold(
                 appBar: AppBar(
-                  title: const Text('Aditech AI'),
+                  title: const Text('ADITECH'),
                   backgroundColor: Colors.deepPurple,
+                  centerTitle: true,
                 ),
+
                 body: Column(
                   children: [
                     Expanded(
                       child: ListView.builder(
                         padding: const EdgeInsets.all(12),
                         itemCount: messages.length - 1,
+
                         itemBuilder: (context, index) {
                           final msg = messages[index + 1];
                           final user = msg['role'] == 'user';
+
                           return Align(
                             alignment: user
                                 ? Alignment.centerRight
                                 : Alignment.centerLeft,
+
                             child: Container(
-                              margin: const EdgeInsets.symmetric(vertical: 6),
+                              margin: const EdgeInsets.symmetric(
+                                vertical: 6
+                              ),
+
                               padding: const EdgeInsets.all(14),
-                              constraints: const BoxConstraints(maxWidth: 300),
+
+                              constraints: const BoxConstraints(
+                                maxWidth: 300
+                              ),
+
                               decoration: BoxDecoration(
                                 color: user
                                     ? Colors.deepPurple
                                     : Colors.grey.shade800,
+
                                 borderRadius: BorderRadius.circular(16),
                               ),
+
                               child: Text(msg['content'] ?? ''),
                             ),
                           );
                         },
                       ),
                     ),
+
                     if (loading)
                       const Padding(
                         padding: EdgeInsets.all(8),
                         child: CircularProgressIndicator(),
                       ),
+
                     Padding(
                       padding: const EdgeInsets.all(12),
+
                       child: Row(
                         children: [
                           Expanded(
                             child: TextField(
                               controller: input,
+
                               decoration: const InputDecoration(
-                                hintText: 'Message Aditech...',
+                                hintText: 'Message ADIRUTI...',
                                 border: OutlineInputBorder(),
                               ),
+
                               onSubmitted: (_) => send(),
                             ),
                           ),
+
                           IconButton(
-                            onPressed: send,
+                            onPressed: loading ? null : send,
                             icon: const Icon(Icons.send),
                           ),
                         ],
@@ -193,8 +229,16 @@ jobs:
           python3 - <<'PY'
           p = 'app/android/app/src/main/AndroidManifest.xml'
           s = open(p).read()
-          s = s.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
-          s = s.replace('<application', '<application android:usesCleartextTraffic="true"', 1)
+          s = s.replace(
+              '<application',
+              '<uses-permission android:name="android.permission.INTERNET"/>\n    <application',
+              1
+          )
+          s = s.replace(
+              '<application',
+              '<application android:usesCleartextTraffic="true"',
+              1
+          )
           open(p, 'w').write(s)
           PY
 
