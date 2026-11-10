@@ -40,7 +40,6 @@ jobs:
               '<application',
               '''<uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-
               <queries>
                   <intent>
                       <action android:name="android.speech.RecognitionService"/>
@@ -49,7 +48,6 @@ jobs:
                       <action android:name="android.intent.action.TTS_SERVICE"/>
                   </intent>
               </queries>
-
               <application android:usesCleartextTraffic="true"''',
               1
           )
@@ -57,18 +55,33 @@ jobs:
           p.write_text(s)
           PY
 
-      - name: Create Aditech app
+      - name: Create ADITECH application
         run: |
           mkdir -p app/lib
+
           cat > app/lib/main.dart <<'DART'
+          import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
+
           import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
           import 'package:speech_to_text/speech_to_text.dart' as stt;
           import 'package:flutter_tts/flutter_tts.dart';
 
           void main() {
+            WidgetsFlutterBinding.ensureInitialized();
             runApp(const AditechApp());
+          }
+
+          enum AssistantStatus {
+            idle,
+            listening,
+            thinking,
+            generating,
+            speaking,
+            completed,
+            error,
           }
 
           class AditechApp extends StatelessWidget {
@@ -79,11 +92,13 @@ jobs:
               return MaterialApp(
                 debugShowCheckedModeBanner: false,
                 title: 'ADITECH',
-                theme: ThemeData.dark().copyWith(
-                  scaffoldBackgroundColor: const Color(0xFF080D18),
+                theme: ThemeData(
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: const Color(0xFF080B14),
                   colorScheme: const ColorScheme.dark(
                     primary: Color(0xFF00D9FF),
                   ),
+                  useMaterial3: true,
                 ),
                 home: const ChatScreen(),
               );
@@ -98,26 +113,47 @@ jobs:
           }
 
           class _ChatScreenState extends State<ChatScreen> {
-            final TextEditingController controller = TextEditingController();
-            final ScrollController scrollController = ScrollController();
+            final TextEditingController controller =
+                TextEditingController();
+
+            final ScrollController scrollController =
+                ScrollController();
 
             final stt.SpeechToText speech = stt.SpeechToText();
+
             final FlutterTts tts = FlutterTts();
 
             final List<Map<String, String>> messages = [];
+
+            AssistantStatus status = AssistantStatus.idle;
 
             bool listening = false;
             bool loading = false;
             bool speechAvailable = false;
 
-            String selectedLanguage = 'en_IN';
+            String selectedLanguage = 'auto';
 
-            static const String systemPrompt =
-                'You are ADIRUTI, the personal AI assistant inside the ADITECH Android app. '
-                'Your creator is ADI. Your AI identity is ADI IDEOLOGY. '
-                'Your AI brand is IRITATOR. '
-                'Be helpful, honest, friendly and clear. '
-                'Reply in the language used by the user, Hindi or English.';
+            static const String apiUrl =
+                'http://127.0.0.1:8080/v1/chat/completions';
+
+            static const String systemPrompt = '''
+          You are ADIRUTI, the personal AI assistant inside ADITECH.
+
+          Creator: ADI.
+          AI Identity: ADI IDEOLOGY.
+          AI Brand: IRITATOR.
+
+          LANGUAGE RULES:
+          1. Understand Hindi, English and Hinglish.
+          2. Reply in the same language and writing style as the user.
+          3. If the user writes Hindi using English letters, reply in Roman Hindi.
+          4. If the user writes English, reply in simple English.
+          5. If the user writes Hindi in Devanagari, reply in Hindi.
+          6. Keep answers friendly, natural and easy to understand.
+
+          Be helpful, honest and clear.
+          Do not claim to perform actions you have not performed.
+          ''';
 
             @override
             void initState() {
@@ -126,27 +162,45 @@ jobs:
             }
 
             Future<void> initializeVoice() async {
-              speechAvailable = await speech.initialize(
-                onStatus: (status) {
-                  if (status == 'notListening' && mounted) {
-                    setState(() => listening = false);
-                  }
-                },
-                onError: (error) {
-                  if (mounted) {
-                    setState(() => listening = false);
-                  }
-                },
-              );
+              try {
+                speechAvailable = await speech.initialize(
+                  onStatus: (value) {
+                    if (!mounted) return;
 
-              await tts.setSpeechRate(0.45);
-              await tts.setPitch(1.05);
-              await tts.setVolume(1.0);
+                    if (value == 'notListening') {
+                      setState(() {
+                        listening = false;
 
-              if (mounted) setState(() {});
+                        if (status == AssistantStatus.listening) {
+                          status = AssistantStatus.idle;
+                        }
+                      });
+                    }
+                  },
+                  onError: (error) {
+                    if (!mounted) return;
+
+                    setState(() {
+                      listening = false;
+                      status = AssistantStatus.error;
+                    });
+                  },
+                );
+
+                await tts.setSpeechRate(0.45);
+                await tts.setPitch(1.05);
+                await tts.setVolume(1.0);
+                await tts.awaitSpeakCompletion(true);
+
+                if (mounted) setState(() {});
+              } catch (e) {
+                debugPrint('Voice initialization error: $e');
+              }
             }
 
             Future<void> startListening() async {
+              if (loading) return;
+
               if (!speechAvailable) {
                 await initializeVoice();
               }
@@ -158,117 +212,245 @@ jobs:
 
               if (listening) {
                 await speech.stop();
-                setState(() => listening = false);
+
+                if (mounted) {
+                  setState(() {
+                    listening = false;
+                    status = AssistantStatus.idle;
+                  });
+                }
+
                 return;
               }
 
               await tts.stop();
 
-              setState(() => listening = true);
-
-              await speech.listen(
-                localeId: selectedLanguage,
-                listenFor: const Duration(seconds: 30),
-                pauseFor: const Duration(seconds: 3),
-                onResult: (result) {
-                  setState(() {
-                    controller.text = result.recognizedWords;
-                    controller.selection = TextSelection.fromPosition(
-                      TextPosition(offset: controller.text.length),
-                    );
-                  });
-                },
-              );
-            }
-
-            Future<void> speakReply(String text) async {
-              await tts.stop();
-
-              if (text.contains(RegExp(r'[\u0900-\u097F]'))) {
-                await tts.setLanguage('hi-IN');
-              } else {
-                await tts.setLanguage('en-IN');
-              }
-
-              await tts.speak(text);
-            }
-
-            void showMessage(String message) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(message)),
-              );
-            }
-
-            Future<void> sendMessage() async {
-              final text = controller.text.trim();
-
-              if (text.isEmpty || loading) return;
-
-              await speech.stop();
-              await tts.stop();
+              if (!mounted) return;
 
               setState(() {
-                listening = false;
-                loading = true;
-                messages.add({'role': 'user', 'content': text});
-                controller.clear();
+                listening = true;
+                status = AssistantStatus.listening;
               });
 
               try {
-                final client = HttpClient();
-                client.connectionTimeout = const Duration(seconds: 10);
+                final locale = selectedLanguage == 'hi_IN'
+                    ? 'hi_IN'
+                    : 'en_IN';
 
-                final request = await client.postUrl(
-                  Uri.parse('http://127.0.0.1:8080/v1/chat/completions'),
+                await speech.listen(
+                  localeId: locale,
+                  listenFor: const Duration(seconds: 30),
+                  pauseFor: const Duration(seconds: 3),
+                  onResult: (result) {
+                    if (!mounted) return;
+
+                    setState(() {
+                      controller.text = result.recognizedWords;
+
+                      controller.selection =
+                          TextSelection.fromPosition(
+                        TextPosition(
+                          offset: controller.text.length,
+                        ),
+                      );
+                    });
+                  },
                 );
+              } catch (e) {
+                if (!mounted) return;
+
+                setState(() {
+                  listening = false;
+                  status = AssistantStatus.error;
+                });
+              }
+            }
+
+            Future<void> sendMessage() async {
+              final userText = controller.text.trim();
+
+              if (userText.isEmpty || loading) return;
+
+              if (listening) {
+                await speech.stop();
+              }
+
+              await tts.stop();
+
+              setState(() {
+                messages.add({
+                  'role': 'user',
+                  'content': userText,
+                });
+
+                controller.clear();
+                loading = true;
+                listening = false;
+                status = AssistantStatus.thinking;
+              });
+
+              scrollToBottom();
+
+              HttpClient? client;
+
+              try {
+                await Future.delayed(
+                  const Duration(milliseconds: 250),
+                );
+
+                if (!mounted) return;
+
+                setState(() {
+                  status = AssistantStatus.generating;
+                });
+
+                client = HttpClient();
+
+                client.connectionTimeout =
+                    const Duration(seconds: 15);
+
+                final request = await client
+                    .postUrl(Uri.parse(apiUrl))
+                    .timeout(const Duration(seconds: 20));
 
                 request.headers.contentType = ContentType.json;
 
+                final apiMessages = <Map<String, String>>[
+                  {
+                    'role': 'system',
+                    'content': systemPrompt,
+                  },
+                  ...messages.map((message) => {
+                        'role': message['role']!,
+                        'content': message['content']!,
+                      }),
+                ];
+
                 request.write(jsonEncode({
-                  'messages': [
-                    {'role': 'system', 'content': systemPrompt},
-                    ...messages.map((m) => {
-                      'role': m['role'],
-                      'content': m['content'],
-                    }),
-                  ],
+                  'model': 'local-model',
+                  'messages': apiMessages,
                   'temperature': 0.7,
-                  'max_tokens': 400,
+                  'max_tokens': 512,
+                  'stream': false,
                 }));
 
-                final response = await request.close();
-                final body = await response.transform(utf8.decoder).join();
-                client.close();
+                final response = await request.close().timeout(
+                  const Duration(seconds: 120),
+                );
 
-                if (response.statusCode != 200) {
-                  throw Exception('Server error: ${response.statusCode}');
+                final responseBody = await response
+                    .transform(utf8.decoder)
+                    .join()
+                    .timeout(const Duration(seconds: 120));
+
+                if (response.statusCode < 200 ||
+                    response.statusCode >= 300) {
+                  throw Exception(
+                    'Server error: ${response.statusCode}',
+                  );
                 }
 
-                final data = jsonDecode(body);
-                final reply = data['choices'][0]['message']['content']
-                    .toString()
+                final data = jsonDecode(responseBody);
+
+                final answer = data['choices'][0]['message']
+                    ['content']
+                    ?.toString()
                     .trim();
 
-                setState(() {
-                  messages.add({'role': 'assistant', 'content': reply});
-                });
+                if (answer == null || answer.isEmpty) {
+                  throw Exception('Empty AI response');
+                }
 
-                await speakReply(reply);
+                if (!mounted) return;
 
-              } catch (e) {
                 setState(() {
                   messages.add({
                     'role': 'assistant',
-                    'content':
-                        'Connection failed. Please start the ADITECH local AI server in Termux and try again.',
+                    'content': answer,
                   });
+
+                  loading = false;
+                  status = AssistantStatus.completed;
                 });
-              } finally {
-                if (mounted) {
-                  setState(() => loading = false);
-                }
+
                 scrollToBottom();
+              } catch (e) {
+                debugPrint('AI connection error: $e');
+
+                if (!mounted) return;
+
+                setState(() {
+                  loading = false;
+                  status = AssistantStatus.error;
+                });
+
+                showMessage(
+                  'AI connection error. Check llama-server in Termux.',
+                );
+              } finally {
+                client?.close(force: true);
               }
+            }
+
+            Future<void> speakResponse(String text) async {
+              try {
+                await tts.stop();
+
+                if (!mounted) return;
+
+                setState(() {
+                  status = AssistantStatus.speaking;
+                });
+
+                final containsHindi = RegExp(
+                  r'[\u0900-\u097F]',
+                ).hasMatch(text);
+
+                await tts.setLanguage(
+                  containsHindi ? 'hi-IN' : 'en-IN',
+                );
+
+                await tts.speak(text);
+
+                if (!mounted) return;
+
+                setState(() {
+                  status = AssistantStatus.completed;
+                });
+              } catch (e) {
+                if (!mounted) return;
+
+                setState(() {
+                  status = AssistantStatus.error;
+                });
+              }
+            }
+
+            Future<void> stopSpeaking() async {
+              await tts.stop();
+
+              if (!mounted) return;
+
+              setState(() {
+                status = AssistantStatus.completed;
+              });
+            }
+
+            void copyResponse(String text) {
+              Clipboard.setData(ClipboardData(text: text));
+              showMessage('Response copied!');
+            }
+
+            void showMessage(String text) {
+              if (!mounted) return;
+
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(text),
+                  backgroundColor: const Color(0xFF182438),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
             }
 
             void scrollToBottom() {
@@ -283,6 +465,508 @@ jobs:
               });
             }
 
+            String get statusText {
+              switch (status) {
+                case AssistantStatus.idle:
+                  return 'ADI IDEOLOGY READY';
+                case AssistantStatus.listening:
+                  return 'LISTENING';
+                case AssistantStatus.thinking:
+                  return 'THINKING';
+                case AssistantStatus.generating:
+                  return 'GENERATING';
+                case AssistantStatus.speaking:
+                  return 'SPEAKING';
+                case AssistantStatus.completed:
+                  return 'COMPLETED';
+                case AssistantStatus.error:
+                  return 'ERROR';
+              }
+            }
+
+            Color get statusColor {
+              switch (status) {
+                case AssistantStatus.error:
+                  return Colors.redAccent;
+                case AssistantStatus.listening:
+                  return Colors.orangeAccent;
+                case AssistantStatus.speaking:
+                  return Colors.purpleAccent;
+                case AssistantStatus.completed:
+                  return Colors.greenAccent;
+                default:
+                  return const Color(0xFF00D9FF);
+              }
+            }
+
+            IconData get statusIcon {
+              switch (status) {
+                case AssistantStatus.listening:
+                  return Icons.mic;
+                case AssistantStatus.thinking:
+                case AssistantStatus.generating:
+                  return Icons.psychology;
+                case AssistantStatus.speaking:
+                  return Icons.volume_up;
+                case AssistantStatus.completed:
+                  return Icons.check_circle;
+                case AssistantStatus.error:
+                  return Icons.error_outline;
+                default:
+                  return Icons.auto_awesome;
+              }
+            }
+
+            Widget buildStatusIndicator() {
+              final active = loading ||
+                  listening ||
+                  status == AssistantStatus.speaking;
+
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 9,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF121B2C),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(
+                    color: statusColor.withOpacity(0.35),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      statusIcon,
+                      size: 15,
+                      color: statusColor,
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      statusText,
+                      style: TextStyle(
+                        fontSize: 9,
+                        letterSpacing: 0.8,
+                        fontWeight: FontWeight.bold,
+                        color: statusColor,
+                      ),
+                    ),
+                    if (active) ...[
+                      const SizedBox(width: 7),
+                      SizedBox(
+                        width: 11,
+                        height: 11,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: statusColor,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            }
+
+            Widget buildWelcome() {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(25),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        height: 95,
+                        width: 95,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: const LinearGradient(
+                            colors: [
+                              Color(0xFF00D9FF),
+                              Color(0xFF3156C9),
+                            ],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF00D9FF)
+                                  .withOpacity(0.25),
+                              blurRadius: 35,
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.auto_awesome,
+                          size: 45,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 25),
+                      const Text(
+                        'HELLO, I AM ADIRUTI',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'POWERED BY ADI IDEOLOGY',
+                        style: TextStyle(
+                          color: Color(0xFF00D9FF),
+                          fontSize: 12,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      const Text(
+                        'Your personal AI assistant.\nHindi • English • Hinglish',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white60,
+                          height: 1.7,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            Widget buildMessage(Map<String, String> message) {
+              final isUser = message['role'] == 'user';
+              final text = message['content'] ?? '';
+
+              return Align(
+                alignment: isUser
+                    ? Alignment.centerRight
+                    : Alignment.centerLeft,
+                child: Container(
+                  constraints: const BoxConstraints(
+                    maxWidth: 310,
+                  ),
+                  margin: const EdgeInsets.symmetric(vertical: 7),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: isUser
+                        ? const Color(0xFF075B70)
+                        : const Color(0xFF172438),
+                    borderRadius: BorderRadius.only(
+                      topLeft: const Radius.circular(18),
+                      topRight: const Radius.circular(18),
+                      bottomLeft: Radius.circular(
+                        isUser ? 18 : 4,
+                      ),
+                      bottomRight: Radius.circular(
+                        isUser ? 4 : 18,
+                      ),
+                    ),
+                    border: Border.all(
+                      color: isUser
+                          ? const Color(0xFF00D9FF)
+                              .withOpacity(0.2)
+                          : Colors.white.withOpacity(0.05),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isUser ? 'YOU' : 'ADIRUTI',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.2,
+                          color: isUser
+                              ? Colors.white70
+                              : const Color(0xFF00D9FF),
+                        ),
+                      ),
+                      const SizedBox(height: 7),
+                      SelectableText(
+                        text,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          height: 1.5,
+                          color: Colors.white,
+                        ),
+                      ),
+                      if (!isUser) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => copyResponse(text),
+                              icon: const Icon(
+                                Icons.copy,
+                                size: 17,
+                                color: Colors.white60,
+                              ),
+                            ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => speakResponse(text),
+                              icon: const Icon(
+                                Icons.volume_up,
+                                size: 19,
+                                color: Color(0xFF00D9FF),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            Widget buildInputArea() {
+              return Container(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0D1422),
+                  border: Border(
+                    top: BorderSide(
+                      color: Color(0xFF1C2B40),
+                    ),
+                  ),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          const Text(
+                            'VOICE LANGUAGE',
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: Colors.white54,
+                              letterSpacing: 1,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          DropdownButton<String>(
+                            value: selectedLanguage,
+                            dropdownColor: const Color(0xFF182438),
+                            underline: const SizedBox(),
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'auto',
+                                child: Text('Auto / Hinglish'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'en_IN',
+                                child: Text('English'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'hi_IN',
+                                child: Text('Hindi'),
+                              ),
+                            ],
+                            onChanged: (value) {
+                              if (value != null) {
+                                setState(() {
+                                  selectedLanguage = value;
+                                });
+                              }
+                            },
+                          ),
+                          const Spacer(),
+                          if (status == AssistantStatus.speaking)
+                            TextButton.icon(
+                              onPressed: stopSpeaking,
+                              icon: const Icon(
+                                Icons.stop,
+                                size: 17,
+                              ),
+                              label: const Text('Stop'),
+                            ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          Container(
+                            decoration: BoxDecoration(
+                              color: listening
+                                  ? Colors.red.withOpacity(0.15)
+                                  : const Color(0xFF182438),
+                              shape: BoxShape.circle,
+                            ),
+                            child: IconButton(
+                              onPressed: startListening,
+                              icon: Icon(
+                                listening
+                                    ? Icons.mic
+                                    : Icons.mic_none,
+                                color: listening
+                                    ? Colors.redAccent
+                                    : const Color(0xFF00D9FF),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: TextField(
+                              controller: controller,
+                              minLines: 1,
+                              maxLines: 4,
+                              style: const TextStyle(fontSize: 15),
+                              decoration: InputDecoration(
+                                hintText: 'Message ADIRUTI...',
+                                filled: true,
+                                fillColor: const Color(0xFF182438),
+                                contentPadding:
+                                    const EdgeInsets.symmetric(
+                                  horizontal: 17,
+                                  vertical: 13,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(25),
+                                  borderSide: BorderSide.none,
+                                ),
+                              ),
+                              onSubmitted: (_) => sendMessage(),
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Container(
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF00BBD8),
+                              shape: BoxShape.circle,
+                            ),
+                            child: IconButton(
+                              onPressed: loading ? null : sendMessage,
+                              icon: Icon(
+                                loading
+                                    ? Icons.hourglass_top
+                                    : Icons.send,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                body: SafeArea(
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          15, 13, 15, 12,
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              height: 44,
+                              width: 44,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(14),
+                                gradient: const LinearGradient(
+                                  colors: [
+                                    Color(0xFF00D9FF),
+                                    Color(0xFF3156C9),
+                                  ],
+                                ),
+                              ),
+                              child: const Icon(
+                                Icons.auto_awesome,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 11),
+                            const Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'ADITECH',
+                                    style: TextStyle(
+                                      fontSize: 19,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 2,
+                                    ),
+                                  ),
+                                  Text(
+                                    'ADI IDEOLOGY • IRITATOR',
+                                    style: TextStyle(
+                                      fontSize: 9,
+                                      color: Color(0xFF00D9FF),
+                                      letterSpacing: 0.8,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            buildStatusIndicator(),
+                          ],
+                        ),
+                      ),
+                      const Divider(
+                        color: Color(0xFF1C2B40),
+                        height: 1,
+                      ),
+                      Expanded(
+                        child: messages.isEmpty
+                            ? buildWelcome()
+                            : ListView.builder(
+                                controller: scrollController,
+                                padding: const EdgeInsets.all(14),
+                                itemCount: messages.length,
+                                itemBuilder: (context, index) {
+                                  return buildMessage(
+                                    messages[index],
+                                  );
+                                },
+                              ),
+                      ),
+                      if (loading)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 9,
+                          ),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                height: 16,
+                                width: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Color(0xFF00D9FF),
+                                ),
+                              ),
+                              SizedBox(width: 10),
+                              Text(
+                                'ADIRUTI is thinking...',
+                                style: TextStyle(
+                                  color: Color(0xFF00D9FF),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      buildInputArea(),
+                    ],
+                  ),
+                ),
+              );
+            }
+
             @override
             void dispose() {
               controller.dispose();
@@ -291,177 +975,10 @@ jobs:
               tts.stop();
               super.dispose();
             }
-
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(
-                  backgroundColor: const Color(0xFF101A2B),
-                  title: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'ADITECH',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 2,
-                        ),
-                      ),
-                      Text(
-                        'ADIRUTI • AI ASSISTANT',
-                        style: TextStyle(fontSize: 11),
-                      ),
-                    ],
-                  ),
-                  actions: [
-                    IconButton(
-                      onPressed: () async => await tts.stop(),
-                      icon: const Icon(Icons.volume_off),
-                      tooltip: 'Stop voice',
-                    ),
-                  ],
-                ),
-                body: Column(
-                  children: [
-                    Expanded(
-                      child: messages.isEmpty
-                          ? const Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.smart_toy,
-                                    size: 75,
-                                    color: Color(0xFF00D9FF),
-                                  ),
-                                  SizedBox(height: 15),
-                                  Text(
-                                    'Hello! I am ADIRUTI.',
-                                    style: TextStyle(fontSize: 22),
-                                  ),
-                                  Text('Your personal AI assistant'),
-                                ],
-                              ),
-                            )
-                          : ListView.builder(
-                              controller: scrollController,
-                              padding: const EdgeInsets.all(12),
-                              itemCount: messages.length,
-                              itemBuilder: (context, index) {
-                                final message = messages[index];
-                                final isUser = message['role'] == 'user';
-
-                                return Align(
-                                  alignment: isUser
-                                      ? Alignment.centerRight
-                                      : Alignment.centerLeft,
-                                  child: Container(
-                                    margin: const EdgeInsets.symmetric(
-                                      vertical: 6,
-                                    ),
-                                    padding: const EdgeInsets.all(14),
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 310,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: isUser
-                                          ? const Color(0xFF075B70)
-                                          : const Color(0xFF182438),
-                                      borderRadius: BorderRadius.circular(16),
-                                    ),
-                                    child: Text(
-                                      message['content'] ?? '',
-                                      style: const TextStyle(fontSize: 15),
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                    if (loading)
-                      const Padding(
-                        padding: EdgeInsets.all(8),
-                        child: LinearProgressIndicator(),
-                      ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(10, 5, 10, 12),
-                      child: Column(
-                        children: [
-                          Row(
-                            children: [
-                              const Text('Voice language: '),
-                              DropdownButton<String>(
-                                value: selectedLanguage,
-                                dropdownColor: const Color(0xFF182438),
-                                items: const [
-                                  DropdownMenuItem(
-                                    value: 'en_IN',
-                                    child: Text('English'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'hi_IN',
-                                    child: Text('Hindi'),
-                                  ),
-                                ],
-                                onChanged: (value) {
-                                  if (value != null) {
-                                    setState(() {
-                                      selectedLanguage = value;
-                                    });
-                                  }
-                                },
-                              ),
-                            ],
-                          ),
-                          Row(
-                            children: [
-                              IconButton(
-                                onPressed: startListening,
-                                icon: Icon(
-                                  listening ? Icons.mic : Icons.mic_none,
-                                  color: listening
-                                      ? Colors.redAccent
-                                      : const Color(0xFF00D9FF),
-                                  size: 30,
-                                ),
-                              ),
-                              Expanded(
-                                child: TextField(
-                                  controller: controller,
-                                  minLines: 1,
-                                  maxLines: 4,
-                                  decoration: InputDecoration(
-                                    hintText: 'Message ADIRUTI...',
-                                    filled: true,
-                                    fillColor: const Color(0xFF182438),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(25),
-                                      borderSide: BorderSide.none,
-                                    ),
-                                  ),
-                                  onSubmitted: (_) => sendMessage(),
-                                ),
-                              ),
-                              IconButton(
-                                onPressed: loading ? null : sendMessage,
-                                icon: const Icon(
-                                  Icons.send,
-                                  color: Color(0xFF00D9FF),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
           }
           DART
 
-      - name: Build APK
+      - name: Build release APK
         run: |
           cd app
           flutter build apk --release
