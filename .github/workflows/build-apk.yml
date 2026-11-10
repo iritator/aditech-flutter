@@ -1,1 +1,7 @@
+name: Build Aditech APK
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
