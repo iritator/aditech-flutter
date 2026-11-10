@@ -1,4 +1,4 @@
-name: Build ADITECH APK
+name: Build ADITECH 3.0 APK
 
 on:
   workflow_dispatch:
@@ -23,10 +23,10 @@ jobs:
         run: |
           flutter create --org com.aditech --project-name aditech --platforms=android app
 
-      - name: Add voice packages
+      - name: Install packages
         run: |
           cd app
-          flutter pub add speech_to_text flutter_tts
+          flutter pub add speech_to_text flutter_tts image_picker shared_preferences flutter_markdown
 
       - name: Configure Android permissions
         run: |
@@ -36,10 +36,10 @@ jobs:
           p = Path("app/android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
 
-          s = s.replace(
-              '<application',
-              '''<uses-permission android:name="android.permission.INTERNET"/>
+          permissions = """
+              <uses-permission android:name="android.permission.INTERNET"/>
               <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
               <queries>
                   <intent>
                       <action android:name="android.speech.RecognitionService"/>
@@ -48,7 +48,14 @@ jobs:
                       <action android:name="android.intent.action.TTS_SERVICE"/>
                   </intent>
               </queries>
-              <application android:usesCleartextTraffic="true"''',
+          """
+
+          if "android.permission.INTERNET" not in s:
+              s = s.replace("<application", permissions + "\n    <application", 1)
+
+          s = s.replace(
+              "<application",
+              '<application android:usesCleartextTraffic="true"',
               1
           )
 
@@ -66,8 +73,11 @@ jobs:
 
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
-          import 'package:speech_to_text/speech_to_text.dart' as stt;
+          import 'package:flutter_markdown/flutter_markdown.dart';
           import 'package:flutter_tts/flutter_tts.dart';
+          import 'package:image_picker/image_picker.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+          import 'package:speech_to_text/speech_to_text.dart' as stt;
 
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
@@ -123,42 +133,113 @@ jobs:
 
             final FlutterTts tts = FlutterTts();
 
+            final ImagePicker imagePicker = ImagePicker();
+
             final List<Map<String, String>> messages = [];
+
+            HttpClient? activeClient;
+
+            XFile? selectedImage;
 
             AssistantStatus status = AssistantStatus.idle;
 
-            bool listening = false;
             bool loading = false;
+            bool listening = false;
             bool speechAvailable = false;
 
             String selectedLanguage = 'auto';
 
-            static const String apiUrl =
+            static const String textApiUrl =
                 'http://127.0.0.1:8080/v1/chat/completions';
+
+            static const String visionApiUrl =
+                'http://127.0.0.1:8081/v1/chat/completions';
+
+            static const String historyKey = 'aditech_chat_history';
 
             static const String systemPrompt = '''
           You are ADIRUTI, the personal AI assistant inside ADITECH.
 
-          Creator: ADI.
-          AI Identity: ADI IDEOLOGY.
-          AI Brand: IRITATOR.
+          CREATOR: ADI
+          AI IDENTITY: ADI IDEOLOGY
+          AI BRAND: IRITATOR
 
-          LANGUAGE RULES:
+          PERSONALITY:
+          Be caring, supportive, intelligent, friendly and emotionally aware.
+          Listen carefully and understand the user's feelings.
+          Never encourage emotional dependence or claim to be human.
+          Be honest about your abilities and limitations.
+
+          LANGUAGE:
           1. Understand Hindi, English and Hinglish.
-          2. Reply in the same language and writing style as the user.
-          3. If the user writes Hindi using English letters, reply in Roman Hindi.
-          4. If the user writes English, reply in simple English.
-          5. If the user writes Hindi in Devanagari, reply in Hindi.
-          6. Keep answers friendly, natural and easy to understand.
+          2. If the user writes Hindi in English letters, reply in Roman Hindi.
+          3. If the user writes English, reply in simple English.
+          4. If the user writes Hindi in Devanagari, reply in Hindi.
+          5. Follow the user's language naturally.
+          6. Avoid unnecessarily difficult vocabulary.
 
-          Be helpful, honest and clear.
-          Do not claim to perform actions you have not performed.
+          VISION:
+          When an image is provided, carefully inspect its visible contents.
+          Answer questions about the image.
+          For educational images, explain the visible question clearly.
+          Never pretend to see an image that was not provided.
+
+          RESPONSE STYLE:
+          Use clear formatting, headings and lists when helpful.
+          Be concise for simple questions and detailed for complex questions.
+          Do not invent facts.
           ''';
 
             @override
             void initState() {
               super.initState();
               initializeVoice();
+              loadHistory();
+            }
+
+            Future<void> loadHistory() async {
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                final saved = prefs.getString(historyKey);
+
+                if (saved == null) return;
+
+                final decoded = jsonDecode(saved);
+
+                if (decoded is List) {
+                  if (!mounted) return;
+
+                  setState(() {
+                    messages.clear();
+
+                    for (final item in decoded) {
+                      if (item is Map) {
+                        messages.add({
+                          'role': item['role'].toString(),
+                          'content': item['content'].toString(),
+                        });
+                      }
+                    }
+                  });
+
+                  scrollToBottom();
+                }
+              } catch (e) {
+                debugPrint('History load error: $e');
+              }
+            }
+
+            Future<void> saveHistory() async {
+              try {
+                final prefs = await SharedPreferences.getInstance();
+
+                await prefs.setString(
+                  historyKey,
+                  jsonEncode(messages),
+                );
+              } catch (e) {
+                debugPrint('History save error: $e');
+              }
             }
 
             Future<void> initializeVoice() async {
@@ -266,10 +347,77 @@ jobs:
               }
             }
 
+            Future<void> pickImage(ImageSource source) async {
+              if (loading) return;
+
+              try {
+                final XFile? image = await imagePicker.pickImage(
+                  source: source,
+                  imageQuality: 75,
+                  maxWidth: 1280,
+                  maxHeight: 1280,
+                );
+
+                if (image == null || !mounted) return;
+
+                setState(() {
+                  selectedImage = image;
+                });
+              } catch (e) {
+                showMessage('Unable to select image: $e');
+              }
+            }
+
+            Future<void> showImageOptions() async {
+              if (loading) return;
+
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: const Color(0xFF172438),
+                builder: (context) {
+                  return SafeArea(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ListTile(
+                            leading: const Icon(
+                              Icons.camera_alt,
+                              color: Color(0xFF00D9FF),
+                            ),
+                            title: const Text('Open Camera'),
+                            onTap: () {
+                              Navigator.pop(context);
+                              pickImage(ImageSource.camera);
+                            },
+                          ),
+                          ListTile(
+                            leading: const Icon(
+                              Icons.photo_library,
+                              color: Color(0xFF00D9FF),
+                            ),
+                            title: const Text('Choose from Gallery'),
+                            onTap: () {
+                              Navigator.pop(context);
+                              pickImage(ImageSource.gallery);
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            }
+
             Future<void> sendMessage() async {
               final userText = controller.text.trim();
+              final image = selectedImage;
 
-              if (userText.isEmpty || loading) return;
+              if ((userText.isEmpty && image == null) || loading) {
+                return;
+              }
 
               if (listening) {
                 await speech.stop();
@@ -277,54 +425,105 @@ jobs:
 
               await tts.stop();
 
+              final actualText = userText.isEmpty
+                  ? 'Please describe this image.'
+                  : userText;
+
               setState(() {
                 messages.add({
                   'role': 'user',
-                  'content': userText,
+                  'content': actualText,
                 });
 
                 controller.clear();
+                selectedImage = null;
                 loading = true;
                 listening = false;
                 status = AssistantStatus.thinking;
               });
 
               scrollToBottom();
+              await saveHistory();
 
               HttpClient? client;
 
               try {
-                await Future.delayed(
-                  const Duration(milliseconds: 250),
-                );
+                String? imageData;
+                String? imageMime;
 
-                if (!mounted) return;
+                if (image != null) {
+                  final bytes = await image.readAsBytes();
+
+                  imageData = base64Encode(bytes);
+
+                  final extension =
+                      image.name.split('.').last.toLowerCase();
+
+                  imageMime = extension == 'png'
+                      ? 'image/png'
+                      : extension == 'webp'
+                          ? 'image/webp'
+                          : 'image/jpeg';
+                }
+
+                if (!mounted || !loading) return;
 
                 setState(() {
                   status = AssistantStatus.generating;
                 });
 
                 client = HttpClient();
+                activeClient = client;
 
                 client.connectionTimeout =
-                    const Duration(seconds: 15);
+                    const Duration(seconds: 20);
 
-                final request = await client
-                    .postUrl(Uri.parse(apiUrl))
-                    .timeout(const Duration(seconds: 20));
-
-                request.headers.contentType = ContentType.json;
-
-                final apiMessages = <Map<String, String>>[
+                final apiMessages = <Map<String, dynamic>>[
                   {
                     'role': 'system',
                     'content': systemPrompt,
                   },
-                  ...messages.map((message) => {
-                        'role': message['role']!,
-                        'content': message['content']!,
-                      }),
                 ];
+
+                for (int i = 0; i < messages.length; i++) {
+                  final message = messages[i];
+
+                  if (imageData != null &&
+                      i == messages.length - 1 &&
+                      message['role'] == 'user') {
+                    apiMessages.add({
+                      'role': 'user',
+                      'content': [
+                        {
+                          'type': 'text',
+                          'text': message['content']!,
+                        },
+                        {
+                          'type': 'image_url',
+                          'image_url': {
+                            'url':
+                                'data:$imageMime;base64,$imageData',
+                          },
+                        },
+                      ],
+                    });
+                  } else {
+                    apiMessages.add({
+                      'role': message['role'],
+                      'content': message['content'],
+                    });
+                  }
+                }
+
+                final endpoint = imageData != null
+                    ? visionApiUrl
+                    : textApiUrl;
+
+                final request = await client
+                    .postUrl(Uri.parse(endpoint))
+                    .timeout(const Duration(seconds: 30));
+
+                request.headers.contentType = ContentType.json;
 
                 request.write(jsonEncode({
                   'model': 'local-model',
@@ -335,13 +534,13 @@ jobs:
                 }));
 
                 final response = await request.close().timeout(
-                  const Duration(seconds: 120),
+                  const Duration(seconds: 180),
                 );
 
                 final responseBody = await response
                     .transform(utf8.decoder)
                     .join()
-                    .timeout(const Duration(seconds: 120));
+                    .timeout(const Duration(seconds: 180));
 
                 if (response.statusCode < 200 ||
                     response.statusCode >= 300) {
@@ -361,7 +560,7 @@ jobs:
                   throw Exception('Empty AI response');
                 }
 
-                if (!mounted) return;
+                if (!mounted || !loading) return;
 
                 setState(() {
                   messages.add({
@@ -373,23 +572,43 @@ jobs:
                   status = AssistantStatus.completed;
                 });
 
+                await saveHistory();
                 scrollToBottom();
               } catch (e) {
                 debugPrint('AI connection error: $e');
 
                 if (!mounted) return;
 
-                setState(() {
-                  loading = false;
-                  status = AssistantStatus.error;
-                });
+                if (loading) {
+                  setState(() {
+                    loading = false;
+                    status = AssistantStatus.error;
+                  });
 
-                showMessage(
-                  'AI connection error. Check llama-server in Termux.',
-                );
+                  showMessage(
+                    'AI connection error. Check both Termux servers.',
+                  );
+                }
               } finally {
+                if (identical(activeClient, client)) {
+                  activeClient = null;
+                }
+
                 client?.close(force: true);
               }
+            }
+
+            Future<void> stopGeneration() async {
+              activeClient?.close(force: true);
+
+              if (!mounted) return;
+
+              setState(() {
+                loading = false;
+                status = AssistantStatus.idle;
+              });
+
+              showMessage('Generation stopped.');
             }
 
             Future<void> speakResponse(String text) async {
@@ -402,9 +621,8 @@ jobs:
                   status = AssistantStatus.speaking;
                 });
 
-                final containsHindi = RegExp(
-                  r'[\u0900-\u097F]',
-                ).hasMatch(text);
+                final containsHindi =
+                    RegExp(r'[\u0900-\u097F]').hasMatch(text);
 
                 await tts.setLanguage(
                   containsHindi ? 'hi-IN' : 'en-IN',
@@ -434,6 +652,25 @@ jobs:
               setState(() {
                 status = AssistantStatus.completed;
               });
+            }
+
+            Future<void> newChat() async {
+              if (loading) {
+                await stopGeneration();
+              }
+
+              await tts.stop();
+
+              if (!mounted) return;
+
+              setState(() {
+                messages.clear();
+                selectedImage = null;
+                controller.clear();
+                status = AssistantStatus.idle;
+              });
+
+              await saveHistory();
             }
 
             void copyResponse(String text) {
@@ -644,7 +881,7 @@ jobs:
                     : Alignment.centerLeft,
                 child: Container(
                   constraints: const BoxConstraints(
-                    maxWidth: 310,
+                    maxWidth: 320,
                   ),
                   margin: const EdgeInsets.symmetric(vertical: 7),
                   padding: const EdgeInsets.all(14),
@@ -655,17 +892,12 @@ jobs:
                     borderRadius: BorderRadius.only(
                       topLeft: const Radius.circular(18),
                       topRight: const Radius.circular(18),
-                      bottomLeft: Radius.circular(
-                        isUser ? 18 : 4,
-                      ),
-                      bottomRight: Radius.circular(
-                        isUser ? 4 : 18,
-                      ),
+                      bottomLeft: Radius.circular(isUser ? 18 : 4),
+                      bottomRight: Radius.circular(isUser ? 4 : 18),
                     ),
                     border: Border.all(
                       color: isUser
-                          ? const Color(0xFF00D9FF)
-                              .withOpacity(0.2)
+                          ? const Color(0xFF00D9FF).withOpacity(0.2)
                           : Colors.white.withOpacity(0.05),
                     ),
                   ),
@@ -684,14 +916,41 @@ jobs:
                         ),
                       ),
                       const SizedBox(height: 7),
-                      SelectableText(
-                        text,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          height: 1.5,
-                          color: Colors.white,
+                      if (isUser)
+                        SelectableText(
+                          text,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            height: 1.5,
+                            color: Colors.white,
+                          ),
+                        )
+                      else
+                        MarkdownBody(
+                          data: text,
+                          selectable: true,
+                          styleSheet: MarkdownStyleSheet(
+                            p: const TextStyle(
+                              fontSize: 15,
+                              height: 1.5,
+                              color: Colors.white,
+                            ),
+                            h1: const TextStyle(
+                              fontSize: 21,
+                              color: Color(0xFF00D9FF),
+                              fontWeight: FontWeight.bold,
+                            ),
+                            h2: const TextStyle(
+                              fontSize: 19,
+                              color: Color(0xFF00D9FF),
+                              fontWeight: FontWeight.bold,
+                            ),
+                            code: const TextStyle(
+                              color: Color(0xFF00D9FF),
+                              backgroundColor: Color(0xFF080B14),
+                            ),
+                          ),
                         ),
-                      ),
                       if (!isUser) ...[
                         const SizedBox(height: 8),
                         Row(
@@ -720,6 +979,55 @@ jobs:
                       ],
                     ],
                   ),
+                ),
+              );
+            }
+
+            Widget buildImagePreview() {
+              if (selectedImage == null) {
+                return const SizedBox.shrink();
+              }
+
+              return Container(
+                margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF172438),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(9),
+                      child: Image.file(
+                        File(selectedImage!.path),
+                        height: 75,
+                        width: 75,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Image ready for ADIRUTI',
+                        style: TextStyle(
+                          color: Color(0xFF00D9FF),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () {
+                        setState(() {
+                          selectedImage = null;
+                        });
+                      },
+                      icon: const Icon(
+                        Icons.close,
+                        color: Colors.redAccent,
+                      ),
+                    ),
+                  ],
                 ),
               );
             }
@@ -777,19 +1085,30 @@ jobs:
                             },
                           ),
                           const Spacer(),
-                          if (status == AssistantStatus.speaking)
+                          if (loading)
+                            TextButton.icon(
+                              onPressed: stopGeneration,
+                              icon: const Icon(Icons.stop, size: 17),
+                              label: const Text('Stop'),
+                            )
+                          else if (status == AssistantStatus.speaking)
                             TextButton.icon(
                               onPressed: stopSpeaking,
-                              icon: const Icon(
-                                Icons.stop,
-                                size: 17,
-                              ),
+                              icon: const Icon(Icons.stop, size: 17),
                               label: const Text('Stop'),
                             ),
                         ],
                       ),
+                      buildImagePreview(),
                       Row(
                         children: [
+                          IconButton(
+                            onPressed: loading ? null : showImageOptions,
+                            icon: const Icon(
+                              Icons.add_photo_alternate_outlined,
+                              color: Color(0xFF00D9FF),
+                            ),
+                          ),
                           Container(
                             decoration: BoxDecoration(
                               color: listening
@@ -800,16 +1119,14 @@ jobs:
                             child: IconButton(
                               onPressed: startListening,
                               icon: Icon(
-                                listening
-                                    ? Icons.mic
-                                    : Icons.mic_none,
+                                listening ? Icons.mic : Icons.mic_none,
                                 color: listening
                                     ? Colors.redAccent
                                     : const Color(0xFF00D9FF),
                               ),
                             ),
                           ),
-                          const SizedBox(width: 7),
+                          const SizedBox(width: 5),
                           Expanded(
                             child: TextField(
                               controller: controller,
@@ -842,9 +1159,7 @@ jobs:
                             child: IconButton(
                               onPressed: loading ? null : sendMessage,
                               icon: Icon(
-                                loading
-                                    ? Icons.hourglass_top
-                                    : Icons.send,
+                                loading ? Icons.hourglass_top : Icons.send,
                                 color: Colors.white,
                               ),
                             ),
@@ -911,6 +1226,14 @@ jobs:
                                 ],
                               ),
                             ),
+                            IconButton(
+                              tooltip: 'New Chat',
+                              onPressed: newChat,
+                              icon: const Icon(
+                                Icons.add_comment_outlined,
+                                color: Color(0xFF00D9FF),
+                              ),
+                            ),
                             buildStatusIndicator(),
                           ],
                         ),
@@ -927,9 +1250,7 @@ jobs:
                                 padding: const EdgeInsets.all(14),
                                 itemCount: messages.length,
                                 itemBuilder: (context, index) {
-                                  return buildMessage(
-                                    messages[index],
-                                  );
+                                  return buildMessage(messages[index]);
                                 },
                               ),
                       ),
@@ -969,6 +1290,7 @@ jobs:
 
             @override
             void dispose() {
+              activeClient?.close(force: true);
               controller.dispose();
               scrollController.dispose();
               speech.stop();
@@ -986,5 +1308,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aditech-Android-APK
+          name: ADITECH-3.0-Android-APK
           path: app/build/app/outputs/flutter-apk/app-release.apk
